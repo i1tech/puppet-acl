@@ -1,5 +1,6 @@
 require 'set'
 require 'pathname'
+require 'English'
 
 Puppet::Type.newtype(:posix_acl) do
   desc <<-EOT
@@ -41,13 +42,13 @@ Puppet::Type.newtype(:posix_acl) do
     EOT
 
   newparam(:action) do
-    desc "What do we do with this list of ACLs? Options are set, unset, exact, and purge"
+    desc 'What do we do with this list of ACLs? Options are set, unset, exact, and purge'
     newvalues(:set, :unset, :exact, :purge)
     defaultto :set
   end
 
   newparam(:path) do
-    desc "The file or directory to which the ACL applies."
+    desc 'The file or directory to which the ACL applies.'
     isnamevar
     validate do |value|
       path = Pathname.new(value)
@@ -70,37 +71,39 @@ Puppet::Type.newtype(:posix_acl) do
 
   # Credits to @itdoesntwork
   # http://stackoverflow.com/questions/26878341/how-do-i-tell-if-one-path-is-an-ancestor-of-another
-  def self.is_descendant?(a, b)
+  def self.descendant?(a, b)
     a_list = File.expand_path(a).split('/')
     b_list = File.expand_path(b).split('/')
 
-    b_list[0..a_list.size-1] == a_list and b_list != a_list
+    b_list[0..a_list.size - 1] == a_list && b_list != a_list
   end
 
   # Snippet based on upstream Puppet (ASL 2.0)
-  [:posix_acl, :file].each do | autorequire_type |
+  [:posix_acl, :file].each do |autorequire_type|
     autorequire(autorequire_type) do
       req = []
       path = Pathname.new(self[:path])
       if autorequire_type != :posix_acl
         if self[:recursive] == :true
-          catalog.resources.find_all { |r|
-            r.is_a?(Puppet::Type.type(autorequire_type)) and self.class.is_descendant?(self[:path], r[:path])
-          }.each do | found |
+          catalog.resources.select do |r|
+            r.is_a?(Puppet::Type.type(autorequire_type)) && self.class.descendant?(self[:path], r[:path])
+          end.each do |found| # rubocop:disable Style/MultilineBlockChain
             req << found[:path]
           end
         end
         req << self[:path]
       end
-      if !path.root?
+      unless path.root?
         # Start at our parent, to avoid autorequiring ourself
         parents = path.parent.enum_for(:ascend)
-        if found = parents.find { |p| catalog.resource(autorequire_type, p.to_s) }
+        # should this be = or == ? I don't know
+        if found = parents.find { |p| catalog.resource(autorequire_type, p.to_s) } # rubocop:disable Lint/AssignmentInCondition
           req << found.to_s
         end
       end
       req
     end
+    # rubocop:enable Style/MultilineBlockChain
   end
   # End of Snippet
 
@@ -108,11 +111,11 @@ Puppet::Type.newtype(:posix_acl) do
     ['acl']
   end
 
-  newproperty(:permission, :array_matching => :all) do
-    desc "ACL permission(s)."
+  newproperty(:permission, array_matching: :all) do
+    desc 'ACL permission(s).'
 
-    def is_to_s(value)
-      if value == :absent or value.include?(:absent)
+    def is_to_s(value) # rubocop:disable Style/PredicateName
+      if value == :absent || value.include?(:absent)
         super
       else
         value.sort.inspect
@@ -120,7 +123,7 @@ Puppet::Type.newtype(:posix_acl) do
     end
 
     def should_to_s(value)
-      if value == :absent or value.include?(:absent)
+      if value == :absent || value.include?(:absent)
         super
       else
         value.sort.inspect
@@ -131,16 +134,14 @@ Puppet::Type.newtype(:posix_acl) do
       provider.permission
     end
 
+    # Remove permission bits from an ACL line, eg:
+    # 'user:root:rwx' becomes 'user:root:'
     def strip_perms(pl)
-      desc = "Remove permission bits from an ACL line, eg:
-              user:root:rwx
-                becomes
-              user:root:"
-      Puppet.debug "permission.strip_perms"
+      Puppet.debug 'permission.strip_perms'
       value = []
       pl.each do |perm|
-        unless perm =~ /^(((u(ser)?)|(g(roup)?)|(m(ask)?)|(o(ther)?)):):/
-          perm = perm.split(':',-1)[0..-2].join(':')
+        unless perm =~ %r{^(((u(ser)?)|(g(roup)?)|(m(ask)?)|(o(ther)?)):):}
+          perm = perm.split(':', -1)[0..-2].join(':')
           value << perm
         end
       end
@@ -154,72 +155,63 @@ Puppet::Type.newtype(:posix_acl) do
     def unset_insync(cur_perm)
       # Puppet.debug "permission.unset_insync"
       test_should = []
-      @should.each { |x| test_should << x.downcase() }
+      @should.each { |x| test_should << x.downcase }
       cp = strip_perms(cur_perm)
       sp = strip_perms(test_should)
       (sp - cp).sort == sp
     end
 
-    def set_insync(cur_perm)
-      should = @should.uniq.sort
-      (cur_perm.sort == should) or (provider.check_set and ((should - cur_perm).length == 0))
+    # Make sure we are not misinterpreting recursive permission notation (e.g. rwX) when
+    # comparing current to new perms.
+    def set_insync(cur_perm) # rubocop:disable Style/AccessorMethodName
+      lc_cur_perm = cur_perm.map(&:downcase).uniq.sort
+      should = @should.map(&:downcase).uniq.sort
+      (lc_cur_perm.sort == should) || (provider.check_set && (should - lc_cur_perm).empty?)
     end
 
     def purge_insync(cur_perm)
       # Puppet.debug "permission.purge_insync"
       cur_perm.each do |perm|
         # If anything other than the mode bits are set, we're not in sync
-        if !(perm =~ /^(((u(ser)?)|(g(roup)?)|(o(ther)?)):):/)
-          return false
-        end
+        return false unless perm =~ %r{^(((u(ser)?)|(g(roup)?)|(o(ther)?)):):}
       end
-      return true
+      true
     end
 
     def insync?(is)
       Puppet.debug "permission.insync? is: #{is.inspect} @should: #{@should.inspect}"
-      if provider.check_purge
-        return purge_insync(is)
-      end
-      if provider.check_unset
-        return unset_insync(is)
-      end
-      return set_insync(is)
+      return purge_insync(is) if provider.check_purge
+      return unset_insync(is) if provider.check_unset
+      set_insync(is)
     end
 
     # Munge into normalised form
     munge do |acl|
       r = ''
       a = acl.split ':', -1 # -1 keeps trailing empty fields.
-      if a.length < 3
-        raise ArgumentError, "Too few fields.  At least 3 required, got #{a.length}."
-      elsif a.length > 4
-        raise ArgumentError, "Too many fields.  At most 4 allowed, got #{a.length}."
-      end
+      raise ArgumentError, "Too few fields.  At least 3 required, got #{a.length}." if a.length < 3
+      raise ArgumentError, "Too many fields.  At most 4 allowed, got #{a.length}."  if a.length > 4
       if a.length == 4
         d = a.shift
-        if d == 'd' || d == 'default'
-          r << 'default:'
-        else
-          raise ArgumentError, %(First field of 4 must be "d" or "default", got "#{d}".)
-        end
+        raise ArgumentError, %(First field of 4 must be "d" or "default", got "#{d}".) unless %w[d default].include?(d)
+        r << 'default:'
       end
       t = a.shift # Copy the type.
       r << case t
-      when 'u', 'user'
-        'user:'
-      when 'g', 'group'
-        'group:'
-      when 'o', 'other'
-        'other:'
-      when 'm', 'mask'
-        'mask:'
-      else
-        raise ArgumentError, %(Unknown type "#{t}", expected "user", "group", "other" or "mask".)
-      end
+           when 'u', 'user'
+             'user:'
+           when 'g', 'group'
+             'group:'
+           when 'o', 'other'
+             'other:'
+           when 'm', 'mask'
+             'mask:'
+           else
+             raise ArgumentError, %(Unknown type "#{t}", expected "user", "group", "other" or "mask".)
+           end
       r << "#{a.shift}:" # Copy the "who".
       p = a.shift
-      if p =~ /[0-7]/
+      if p =~ %r{[0-7]}
         p = p.oct
         r << (p | 4 ? 'r' : '-')
         r << (p | 2 ? 'w' : '-')
@@ -229,28 +221,26 @@ Puppet::Type.newtype(:posix_acl) do
         s = p.tr '-', ''
         r << (s.sub!('r', '') ? 'r' : '-')
         r << (s.sub!('w', '') ? 'w' : '-')
-        r << (s.sub!('x', '') ? 'x' : '-')
-        if !s.empty?
-          raise ArgumentError, %(Invalid permission set "#{p}".)
-        end
+        r << (s.sub!(%r{x}i, '') ? $LAST_MATCH_INFO.to_s : '-')
+        raise ArgumentError, %(Invalid permission set "#{p}".) unless s.empty?
       end
       r
     end
   end
 
   newparam(:recursive) do
-    desc "Apply ACLs recursively."
+    desc 'Apply ACLs recursively.'
     newvalues(:true, :false)
     defaultto :false
   end
 
   def self.pick_default_perms(acl)
-    return acl.reject { |a| a.split(':', -1).length == 4 }
+    acl.reject { |a| a.split(':', -1).length == 4 }
   end
 
   def newchild(path)
-    options = @original_parameters.merge(:name => path).reject { |param, value| value.nil? }
-    unless File.directory?(options[:name]) then
+    options = @original_parameters.merge(name: path).reject { |_param, value| value.nil? }
+    unless File.directory?(options[:name])
       options[:permission] = self.class.pick_default_perms(options[:permission]) if options.include?(:permission)
     end
     [:recursive, :recursemode, :path].each do |param|
@@ -260,9 +250,9 @@ Puppet::Type.newtype(:posix_acl) do
   end
 
   def generate
-    return [] unless self[:recursive] == :true and self[:recursemode] == :deep
+    return [] unless self[:recursive] == :true && self[:recursemode] == :deep
     results = []
-    paths = Set.new()
+    paths = Set.new
     if File.directory?(self[:path])
       Dir.chdir(self[:path]) do
         Dir['**/*'].each do |path|
@@ -273,21 +263,20 @@ Puppet::Type.newtype(:posix_acl) do
     # At the time we generate extra resources, all the files might now be present yet.
     # In prediction to that we also create ACL resources for child file resources that
     # might not have been applied yet.
-    catalog.resources.find_all { |r|
-      r.is_a?(Puppet::Type.type(:file)) and self.class.is_descendant?(self[:path], r[:path])
-    }.each do | found |
+    catalog.resources.select do |r|
+      r.is_a?(Puppet::Type.type(:file)) && self.class.descendant?(self[:path], r[:path])
+    end.each do |found| # rubocop:disable Style/MultilineBlockChain
       paths << found[:path]
     end
-    paths.each { | path |
+    paths.each do |path|
       results << newchild(path)
-    }
+    end
     results
   end
 
   validate do
     unless self[:permission]
-      raise(Puppet::Error, "permission is a required property.")
+      raise(Puppet::Error, 'permission is a required property.')
     end
   end
-
 end
